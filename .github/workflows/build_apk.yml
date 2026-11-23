@@ -1,0 +1,42 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Gerar projeto Android e liberar internet
+        run: |
+          if [ ! -d android ]; then
+            flutter create --platforms=android --org com.monitorglobal --project-name monitor_global .
+            rm -f test/widget_test.dart
+          fi
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          grep -q "android.permission.INTERNET" "$MANIFEST" || \
+            sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application|' "$MANIFEST"
+          sed -i 's|android:label="[^"]*"|android:label="Monitor Global"|' "$MANIFEST"
+
+      - run: flutter pub get
+
+      - run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: monitor-global-apk
+          path: build/app/outputs/flutter-apk/app-release.apk

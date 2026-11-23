@@ -1,0 +1,33 @@
+MONITOR GLOBAL v0.1.0 (nome provisório)
+App Flutter de monitoramento mundial de terremotos, ciclones, tempestades e outros fenômenos.
+
+O QUE JÁ FUNCIONA
+- Mapa-múndi com 4 camadas que ligam/desligam: Terremotos (USGS), Ciclones e desastres (GDACS),
+  Alertas EUA (NWS) e Radar (RainViewer).
+- Lista de eventos, mais graves primeiro. Toque abre detalhes e o link da fonte.
+- Toque em qualquer ponto do mapa: vento, rajadas, CAPE e chuva das próximas 24 h (Open-Meteo).
+- Atualização automática a cada 5 minutos.
+
+COMO COMPILAR
+Ao dar push na branch main, o GitHub Actions gera a pasta android, compila e guarda o APK em
+Actions > Build APK > (execução mais recente) > Artifacts > monitor-global-apk.
+
+ANTES DE USAR
+1. Em lib/sources.dart, troque o e-mail na constante _userAgent (o NWS pede identificação).
+2. O ID do pacote Android é com.monitorglobal.monitor_global. Defina o nome final do app ANTES de
+   configurar o Firebase: o google-services.json fica amarrado a esse ID.
+
+LIMITES CONHECIDOS
+- Alertas dos EUA: só avisos com polígono (tornado, tempestade severa, enchente repentina, vento
+  extremo, aviso marítimo). Avisos por zona (ex.: furacão) ainda não aparecem.
+- Terremotos: só M4.5 ou mais nas últimas 24 h.
+- Radar (RainViewer): API gratuita só para uso pessoal ou educacional, com poucos quadros e zoom
+  limitado. Para publicar na Play Store será preciso trocar de fonte.
+- Mapa-base: os tiles do OpenStreetMap servem para desenvolver. Para publicar, usar um provedor de
+  tiles próprio ou comercial.
+- O app é informativo e não substitui alertas oficiais.
+
+PRÓXIMOS PASSOS
+- Alertas oficiais da Europa (MeteoAlarm).
+- Notificações push: Firebase (FCM) + função agendada que consulta as fontes e dispara os avisos.
+- Filtros por região e por gravidade; histórico de eventos.
