@@ -9,6 +9,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'controller.dart';
 import 'format.dart';
 import 'models.dart';
+import 'notifier.dart';
+import 'prefs.dart';
 import 'sources.dart';
 
 const _appId = 'com.monitorglobal.monitor_global';
@@ -89,6 +91,16 @@ class _MapScreenState extends State<MapScreen> {
     showDialog<void>(context: context, builder: (_) => const _AboutDialog());
   }
 
+  void _showSettings() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      backgroundColor: Palette.paper,
+      builder: (_) => AlertSettingsSheet(data: _data),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -103,7 +115,11 @@ class _MapScreenState extends State<MapScreen> {
                 top: 0,
                 left: 0,
                 right: 0,
-                child: _TopPanel(data: _data, onAbout: _showAbout),
+                child: _TopPanel(
+                  data: _data,
+                  onAbout: _showAbout,
+                  onSettings: _showSettings,
+                ),
               ),
               _EventsSheet(
                 controller: _sheet,
@@ -248,10 +264,15 @@ class _TypeBadge extends StatelessWidget {
 // ---------------------------------------------------------------------------
 
 class _TopPanel extends StatelessWidget {
-  const _TopPanel({required this.data, required this.onAbout});
+  const _TopPanel({
+    required this.data,
+    required this.onAbout,
+    required this.onSettings,
+  });
 
   final EventsController data;
   final VoidCallback onAbout;
+  final VoidCallback onSettings;
 
   @override
   Widget build(BuildContext context) {
@@ -289,12 +310,33 @@ class _TopPanel extends StatelessWidget {
                               color: Palette.ink,
                             ),
                           ),
-                          Text(
-                            status,
-                            style: const TextStyle(
-                              fontSize: 12.5,
-                              color: Palette.muted,
-                            ),
+                          Row(
+                            children: [
+                              if (data.liveConnected) ...[
+                                const Icon(
+                                  Icons.circle,
+                                  size: 9,
+                                  color: Color(0xFF2B8A3E),
+                                ),
+                                const SizedBox(width: 5),
+                                const Text(
+                                  'Ao vivo',
+                                  style: TextStyle(
+                                    fontSize: 12.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: Color(0xFF2B8A3E),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                              ],
+                              Text(
+                                status,
+                                style: const TextStyle(
+                                  fontSize: 12.5,
+                                  color: Palette.muted,
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),
@@ -303,6 +345,11 @@ class _TopPanel extends StatelessWidget {
                       tooltip: 'Atualizar',
                       onPressed: data.loading ? null : data.refresh,
                       icon: const Icon(Icons.refresh),
+                    ),
+                    IconButton(
+                      tooltip: 'Avisos',
+                      onPressed: onSettings,
+                      icon: const Icon(Icons.notifications_none),
                     ),
                     IconButton(
                       tooltip: 'Fontes e aviso',
@@ -809,7 +856,7 @@ class _AboutDialog extends StatelessWidget {
       title: const Text('Fontes e aviso'),
       content: const SingleChildScrollView(
         child: Text(
-          'Terremotos: USGS.\n'
+          'Terremotos: USGS e EMSC (tempo real, CC BY 4.0).\n'
           'Ciclones, enchentes, vulcões, incêndios e secas: GDACS (ONU e Comissão Europeia).\n'
           'Avisos de tornado, tempestade severa e enchente repentina: National Weather Service (EUA).\n'
           'Vento e instabilidade: Open-Meteo.\n'
@@ -827,6 +874,146 @@ class _AboutDialog extends StatelessWidget {
           child: const Text('Fechar'),
         ),
       ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Ajustes dos avisos no celular
+// ---------------------------------------------------------------------------
+
+class AlertSettingsSheet extends StatefulWidget {
+  const AlertSettingsSheet({super.key, required this.data});
+
+  final EventsController data;
+
+  @override
+  State<AlertSettingsSheet> createState() => _AlertSettingsSheetState();
+}
+
+class _AlertSettingsSheetState extends State<AlertSettingsSheet> {
+  late AlertPrefs _p = widget.data.prefs;
+  String _msg = '';
+
+  void _set(AlertPrefs p) {
+    setState(() => _p = p);
+    widget.data.updatePrefs(p);
+  }
+
+  Future<void> _permission() async {
+    var ok = false;
+    try {
+      ok = await Notifier.requestPermission();
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      _msg = ok
+          ? 'Notificações ativadas.'
+          : 'Permissão não concedida. Ative em Configurações do Android, Apps, Monitor Global, Notificações.';
+    });
+  }
+
+  Future<void> _test() async {
+    String msg;
+    try {
+      await Notifier.sendTest();
+      msg = 'Aviso de teste enviado.';
+    } catch (_) {
+      msg = 'Não foi possível enviar o aviso de teste.';
+    }
+    if (!mounted) return;
+    setState(() => _msg = msg);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Avisos no celular',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+                color: Palette.ink,
+              ),
+            ),
+            const SizedBox(height: 4),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Terremotos'),
+              subtitle: Text('Magnitude ${num1(_p.minMag)} ou maior'),
+              value: _p.quakes,
+              onChanged: (v) => _set(_p.copyWith(quakes: v)),
+            ),
+            Slider(
+              min: 4.5,
+              max: 8.0,
+              divisions: 7,
+              value: _p.minMag.clamp(4.5, 8.0).toDouble(),
+              label: num1(_p.minMag),
+              onChanged: _p.quakes
+                  ? (v) => _set(_p.copyWith(minMag: (v * 2).round() / 2))
+                  : null,
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Ciclones e desastres'),
+              subtitle: const Text('Alerta laranja ou vermelho (GDACS)'),
+              value: _p.disasters,
+              onChanged: (v) => _set(_p.copyWith(disasters: v)),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Avisos extremos dos EUA'),
+              subtitle: const Text('Tornado e vento extremo (NWS)'),
+              value: _p.alerts,
+              onChanged: (v) => _set(_p.copyWith(alerts: v)),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                FilledButton.tonalIcon(
+                  onPressed: _permission,
+                  icon: const Icon(Icons.notifications_active_outlined),
+                  label: const Text('Ativar notificações'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _test,
+                  icon: const Icon(Icons.send_outlined, size: 18),
+                  label: const Text('Enviar teste'),
+                ),
+              ],
+            ),
+            if (_msg.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Text(_msg, style: _muted),
+              ),
+            const SizedBox(height: 14),
+            const Text(
+              'Com o app aberto, o aviso chega assim que a fonte publica (terremotos pelo EMSC, sem esperar a consulta). '
+              'Com o app fechado, o Android só deixa checar a cada 15 minutos, no '
+              'mínimo, e pode atrasar mais quando a tela fica apagada por muito '
+              'tempo. Para atrasar menos, em Configurações do Android, Apps, '
+              'Monitor Global, Bateria, escolha "Sem restrições". Avisos em '
+              'segundos com o app fechado dependem de um servidor (Firebase), '
+              'que fica para uma próxima versão.',
+              style: TextStyle(
+                fontSize: 12.5,
+                height: 1.35,
+                color: Palette.muted,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

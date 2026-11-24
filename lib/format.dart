@@ -11,6 +11,12 @@ String ago(DateTime t) {
   return '${d.inDays} d';
 }
 
+/// "Agora há pouco", "Há 12 min", "Há 3 h".
+String agoLong(DateTime t) {
+  final a = ago(t);
+  return a == 'agora' ? 'Agora há pouco' : 'Há $a';
+}
+
 String hhmm(DateTime t) {
   final l = t.toLocal();
   return '${two(l.hour)}:${two(l.minute)}';

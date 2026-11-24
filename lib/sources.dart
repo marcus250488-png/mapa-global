@@ -34,13 +34,6 @@ DateTime _parseUtc(dynamic v) {
 // USGS: terremotos M4.5+ nas últimas 24 h, no mundo todo.
 // ---------------------------------------------------------------------------
 
-Severity _quakeSeverity(double m) {
-  if (m >= 7) return Severity.extreme;
-  if (m >= 6) return Severity.high;
-  if (m >= 5) return Severity.moderate;
-  return Severity.low;
-}
-
 Future<List<HazardEvent>> fetchUsgs() async {
   final json = await _getJson(
     'https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/4.5_day.geojson',
@@ -56,7 +49,8 @@ Future<List<HazardEvent>> fetchUsgs() async {
       out.add(HazardEvent(
         id: 'usgs:${f['id']}',
         type: HazardType.earthquake,
-        severity: _quakeSeverity(mag),
+        severity: severityForMagnitude(mag),
+        magnitude: mag,
         title: 'M ${num1(mag)}',
         place: p['place']?.toString(),
         detail: [
@@ -84,12 +78,15 @@ Future<List<HazardEvent>> fetchUsgs() async {
 // Terremotos ficam de fora porque o USGS já cobre.
 // ---------------------------------------------------------------------------
 
-Future<List<HazardEvent>> fetchGdacs() async {
+Future<List<HazardEvent>> fetchGdacs({bool onlyAlerts = false}) async {
   String d(DateTime t) => '${t.year}-${two(t.month)}-${two(t.day)}';
   final now = DateTime.now().toUtc();
+  // Em segundo plano só interessam os alertas laranja e vermelho (resposta bem menor).
+  final levels = onlyAlerts ? 'Orange;Red' : 'Green;Orange;Red';
+  final days = onlyAlerts ? 3 : 7;
   final url = 'https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH'
-      '?eventlist=TC;FL;VO;DR;WF&alertlevel=Green;Orange;Red'
-      '&fromdate=${d(now.subtract(const Duration(days: 7)))}'
+      '?eventlist=TC;FL;VO;DR;WF&alertlevel=$levels'
+      '&fromdate=${d(now.subtract(Duration(days: days)))}'
       '&todate=${d(now.add(const Duration(days: 1)))}';
   final json = await _getJson(url);
 
@@ -181,8 +178,10 @@ LatLng _centroid(List<LatLng> pts) {
   return LatLng(lat / pts.length, lng / pts.length);
 }
 
-Future<List<HazardEvent>> fetchNws() async {
+Future<List<HazardEvent>> fetchNws({bool onlyExtreme = false}) async {
+  final severity = onlyExtreme ? '&severity=Extreme' : '';
   final url = 'https://api.weather.gov/alerts/active?status=actual&message_type=alert'
+      '$severity'
       '&event=${Uri.encodeComponent(_nwsEvents.keys.join(','))}';
   final json = await _getJson(url, headers: {'Accept': 'application/geo+json'});
   final out = <HazardEvent>[];

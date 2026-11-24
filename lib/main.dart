@@ -1,9 +1,20 @@
 import 'package:flutter/material.dart';
 
+import 'background.dart';
 import 'map_screen.dart';
 import 'models.dart';
+import 'notifier.dart';
 
-void main() => runApp(const MonitorApp());
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await Notifier.init();
+  } catch (_) {
+    // Sem notificações: o app continua funcionando.
+  }
+  runApp(const MonitorApp());
+  startBackgroundChecks();
+}
 
 class MonitorApp extends StatelessWidget {
   const MonitorApp({super.key});

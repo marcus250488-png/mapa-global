@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:latlong2/latlong.dart';
 
@@ -101,6 +103,7 @@ class HazardEvent {
     this.detail,
     this.url,
     this.area = const [],
+    this.magnitude,
   });
 
   final String id;
@@ -116,4 +119,33 @@ class HazardEvent {
   final DateTime time;
   final String source;
   final String? url;
+
+  /// Magnitude (só terremotos).
+  final double? magnitude;
 }
+
+/// Gravidade de um terremoto a partir da magnitude.
+Severity severityForMagnitude(double m) {
+  if (m >= 7) return Severity.extreme;
+  if (m >= 6) return Severity.high;
+  if (m >= 5) return Severity.moderate;
+  return Severity.low;
+}
+
+/// Distância em km entre dois pontos (haversine).
+double distanceKm(LatLng a, LatLng b) {
+  double rad(double d) => d * math.pi / 180;
+  final dLat = rad(b.latitude - a.latitude);
+  final dLon = rad(b.longitude - a.longitude);
+  final s1 = math.sin(dLat / 2);
+  final s2 = math.sin(dLon / 2);
+  final h = s1 * s1 + math.cos(rad(a.latitude)) * math.cos(rad(b.latitude)) * s2 * s2;
+  return 2 * 6371.0 * math.asin(math.min(1.0, math.sqrt(h)));
+}
+
+/// Dois registros de terremoto de fontes diferentes que são o mesmo evento.
+bool sameQuake(HazardEvent a, HazardEvent b) =>
+    a.type == HazardType.earthquake &&
+    b.type == HazardType.earthquake &&
+    a.time.difference(b.time).inSeconds.abs() <= 180 &&
+    distanceKm(a.point, b.point) <= 250;
