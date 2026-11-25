@@ -81,14 +81,24 @@ class Notifier {
   }
 
   static bool _wanted(HazardEvent e, AlertPrefs p) {
+    final home = p.home;
+    final radius = (home != null && p.radiusKm > 0) ? p.radiusKm : 0;
+    bool near() => radius > 0 && distanceToEvent(e, home!) <= radius;
     switch (e.type) {
       case HazardType.earthquake:
-        return p.quakes && (e.magnitude ?? 0) >= p.minMag;
+        if (!p.quakes || (e.magnitude ?? 0) < p.minMag) return false;
       case HazardType.storm:
-        return p.alerts && e.severity == Severity.extreme;
+      case HazardType.alert:
+        if (!p.alerts) return false;
+        // Com raio definido, vale qualquer aviso grave ou extremo perto de mim.
+        if (radius > 0) return near() && e.severity.index >= Severity.high.index;
+        return e.severity == Severity.extreme;
       default:
-        return p.disasters && e.severity.index >= Severity.high.index;
+        if (!p.disasters || e.severity.index < Severity.high.index) return false;
     }
+    // Terremotos e desastres: com raio definido, só perto de mim, exceto os extremos.
+    if (radius == 0 || e.severity == Severity.extreme) return true;
+    return near();
   }
 
   static String _sig(HazardEvent e) =>
@@ -122,6 +132,7 @@ class Notifier {
           _quakes,
         );
       case HazardType.storm:
+      case HazardType.alert:
         return (e.title, where, _alerts);
       default:
         final level = e.severity == Severity.extreme ? 'vermelho' : 'laranja';

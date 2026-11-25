@@ -36,6 +36,7 @@ Future<void> runBackgroundCheck() async {
     if (prefs.quakes) grab(fetchUsgs),
     if (prefs.disasters) grab(() => fetchGdacs(onlyAlerts: true)),
     if (prefs.alerts) grab(() => fetchNws(onlyExtreme: true)),
+    if (prefs.alerts) grab(() => fetchAlertHub(limit: 800)),
   ]);
   await Notifier.process(events, prefs);
 }

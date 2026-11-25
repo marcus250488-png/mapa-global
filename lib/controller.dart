@@ -1,15 +1,17 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'filters.dart';
 import 'live.dart';
 import 'models.dart';
 import 'notifier.dart';
 import 'prefs.dart';
 import 'sources.dart';
 
-/// Guarda os eventos de cada fonte, o modo ao vivo e as camadas ligadas.
+/// Guarda os eventos de cada fonte, o modo ao vivo, as camadas e os filtros.
 /// Se uma fonte falha, mantém os dados anteriores dela e avisa na tela.
 class EventsController extends ChangeNotifier {
   EventsController() {
@@ -35,11 +37,16 @@ class EventsController extends ChangeNotifier {
   bool liveConnected = false;
   DateTime? updatedAt;
   RadarInfo? radar;
+  List<SatelliteSource> satellite = const [];
   AlertPrefs prefs = const AlertPrefs();
+  MapFilters filters = const MapFilters();
 
   Future<void> _init() async {
     try {
       prefs = await AlertPrefs.load();
+    } catch (_) {}
+    try {
+      filters = await MapFilters.load();
     } catch (_) {}
     _notify();
     _live.start();
@@ -59,20 +66,16 @@ class EventsController extends ChangeNotifier {
     } catch (_) {}
   }
 
-  /// Eventos das camadas ligadas, mais graves primeiro.
+  /// Eventos das camadas ligadas, já com filtros e ordem aplicados.
   List<HazardEvent> get visible {
     final usgs = _bySource['USGS'] ?? const <HazardEvent>[];
-    final list = [
+    final all = [
       for (final events in _bySource.values) ...events,
       // Terremotos ao vivo que o USGS ainda não publicou.
       for (final e in _liveEvents.values)
         if (!usgs.any((u) => sameQuake(u, e))) e,
     ].where((e) => enabled.contains(e.type.layer)).toList();
-    list.sort((a, b) {
-      final s = b.severity.index.compareTo(a.severity.index);
-      return s != 0 ? s : b.time.compareTo(a.time);
-    });
-    return list;
+    return filters.apply(all, prefs.home);
   }
 
   void _notify() {
@@ -107,7 +110,9 @@ class EventsController extends ChangeNotifier {
       _load('USGS', fetchUsgs),
       if (full) _load('GDACS', fetchGdacs),
       if (full) _load('NWS', fetchNws),
+      if (full) _load('Alertas', fetchAlertHub),
       if (full) _loadRadar(),
+      if (full) _loadSatellite(),
     ]);
     updatedAt = DateTime.now();
     loading = false;
@@ -137,6 +142,17 @@ class EventsController extends ChangeNotifier {
     }
   }
 
+  /// Testa quais camadas de satélite respondem (só quando a camada está ligada).
+  Future<void> _loadSatellite() async {
+    if (!enabled.contains(MapLayer.satellite) || satellite.isNotEmpty) return;
+    try {
+      satellite = await probeSatellite();
+      errors.remove('Satélite');
+    } catch (e) {
+      errors['Satélite'] = e.toString();
+    }
+  }
+
   void _alert() {
     final all = <HazardEvent>[
       for (final events in _bySource.values) ...events,
@@ -151,17 +167,39 @@ class EventsController extends ChangeNotifier {
       enabled.add(layer);
     } else {
       enabled.remove(layer);
+      if (layer == MapLayer.radar) errors.remove('Radar');
+      if (layer == MapLayer.satellite) errors.remove('Satélite');
     }
-    if (layer == MapLayer.radar && !nowOn) errors.remove('Radar');
     _notify();
-    if (layer == MapLayer.radar && nowOn) {
+    if (nowOn && layer == MapLayer.radar) {
       _loadRadar().then((_) => _notify());
+    }
+    if (nowOn && layer == MapLayer.satellite) {
+      _loadSatellite().then((_) => _notify());
     }
   }
 
   void updatePrefs(AlertPrefs p) {
     prefs = p;
     p.save();
+    _notify();
+  }
+
+  void updateFilters(MapFilters f) {
+    filters = f;
+    f.save();
+    _notify();
+  }
+
+  /// Define (ou limpa, com null) "meu local".
+  void setHome(LatLng? p) {
+    prefs = prefs.copyWith(home: p, clearHome: p == null);
+    if (p == null) {
+      prefs = prefs.copyWith(radiusKm: 0);
+      filters = filters.copyWith(radiusKm: 0, sort: SortBy.severity);
+      filters.save();
+    }
+    prefs.save();
     _notify();
   }
 

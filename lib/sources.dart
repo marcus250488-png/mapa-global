@@ -221,7 +221,7 @@ Future<List<HazardEvent>> fetchNws({bool onlyExtreme = false}) async {
             .where((s) => s.isNotEmpty)
             .join('\n'),
         point: _centroid(ring),
-        area: ring,
+        areas: [ring],
         time: _parseUtc(p['onset'] ?? p['effective'] ?? p['sent']),
         source: 'NWS (EUA)',
         url: 'https://www.weather.gov/',
@@ -320,4 +320,234 @@ Future<RadarInfo> fetchRadar() async {
       isUtc: true,
     ),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Alert Hub (OMM/WMO): alertas oficiais CAP de dezenas de países, com polígonos.
+// Os EUA ficam de fora porque já vêm direto do NWS.
+// ---------------------------------------------------------------------------
+
+const _hubHost = 'services9.arcgis.com';
+const _hubPath =
+    '/RHVPKKiFTONKtxq3/ArcGIS/rest/services/CAP_Alerts_Feed/FeatureServer/0/query';
+const _hubFields = 'identifier,event,severity,sent,effective,onset,expires,language,'
+    'headline,areaDesc,senderName,orgName,countryCode,web,hubLink,status,msgType';
+
+Future<dynamic> _hubQuery(
+  String where,
+  String fields,
+  int limit, {
+  bool order = true,
+}) {
+  final uri = Uri.https(_hubHost, _hubPath, {
+    'where': where,
+    'outFields': fields,
+    'returnGeometry': 'true',
+    'outSR': '4326',
+    'maxAllowableOffset': '0.05',
+    'geometryPrecision': '2',
+    if (order) 'orderByFields': 'sent DESC',
+    'resultRecordCount': '$limit',
+    'f': 'geojson',
+  });
+  return _getJson(uri.toString());
+}
+
+/// Inglês primeiro, depois português e espanhol; o resto por último.
+int _langRank(dynamic l) {
+  final s = '$l'.toLowerCase();
+  if (s.startsWith('en')) return 0;
+  if (s.startsWith('pt')) return 1;
+  if (s.startsWith('es')) return 2;
+  return 5;
+}
+
+DateTime? _anyDate(dynamic v) {
+  if (v == null) return null;
+  if (v is num) {
+    return DateTime.fromMillisecondsSinceEpoch(v.toInt(), isUtc: true);
+  }
+  final s = v.toString();
+  final n = num.tryParse(s);
+  if (n != null) {
+    return DateTime.fromMillisecondsSinceEpoch(n.toInt(), isUtc: true);
+  }
+  return DateTime.tryParse(s)?.toUtc();
+}
+
+/// Contornos externos de um Polygon ou MultiPolygon (GeoJSON).
+List<List<LatLng>> _ringsOf(dynamic g) {
+  if (g is! Map) return const [];
+  final c = g['coordinates'];
+  List<LatLng> toRing(dynamic ring) => [
+        for (final pt in (ring as List)) LatLng(_num(pt[1])!, _num(pt[0])!),
+      ];
+  if (g['type'] == 'Polygon') return [toRing((c as List).first)];
+  if (g['type'] == 'MultiPolygon') {
+    return [for (final poly in (c as List)) toRing((poly as List).first)];
+  }
+  return const [];
+}
+
+LatLng _centroidOf(List<List<LatLng>> rings) {
+  final biggest = rings.reduce((a, b) => a.length >= b.length ? a : b);
+  return _centroid(biggest);
+}
+
+class _HubGroup {
+  _HubGroup(this.rank, this.props);
+
+  final int rank;
+  final Map props;
+  final rings = <List<LatLng>>[];
+  final areas = <String>{};
+}
+
+/// Alertas graves e extremos ainda válidos. O servidor é consultado de forma
+/// cada vez mais simples se uma consulta falhar.
+Future<List<HazardEvent>> fetchAlertHub({int limit = 1500}) async {
+  final now = DateTime.now().toUtc();
+  final stamp =
+      '${now.year}-${two(now.month)}-${two(now.day)} ${two(now.hour)}:${two(now.minute)}:${two(now.second)}';
+  const base =
+      "status='Actual' AND msgType<>'Cancel' AND severity IN ('Extreme','Severe')";
+  final attempts = <(String, String, int, bool)>[
+    ("$base AND expires > TIMESTAMP '$stamp'", _hubFields, limit, true),
+    (base, _hubFields, math.min(limit, 800), true),
+    (base, '*', math.min(limit, 400), true),
+    ('1=1', '*', 300, false),
+  ];
+  dynamic json;
+  Object? lastError;
+  for (final (where, fields, n, order) in attempts) {
+    try {
+      final j = await _hubQuery(where, fields, n, order: order);
+      if (j is Map && j['error'] != null) {
+        lastError = '${j['error']['message'] ?? 'erro do servidor'}';
+        continue;
+      }
+      json = j;
+      break;
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  if (json == null) throw Exception('Alert Hub: $lastError');
+
+  // Um alerta traz um registro por idioma e por área: agrupa por identificador,
+  // fica com o melhor idioma e junta todos os contornos.
+  final groups = <String, _HubGroup>{};
+  for (final f in (json['features'] as List? ?? const [])) {
+    try {
+      final p = (f['properties'] as Map?) ?? const {};
+      final country = '${p['countryCode'] ?? ''}'.toLowerCase();
+      final org = '${p['orgName'] ?? p['senderName'] ?? ''}';
+      if (country == 'us' || org.contains('National Weather Service')) continue;
+      final sev = '${p['severity']}';
+      if (sev != 'Extreme' && sev != 'Severe') continue;
+      final status = p['status']?.toString();
+      if (status != null && status != 'Actual') continue;
+      if (p['msgType']?.toString() == 'Cancel') continue;
+      final id = (p['identifier'] ?? p['alertId'])?.toString();
+      final rings = _ringsOf(f['geometry']);
+      if (id == null || rings.isEmpty) continue;
+      final rank = _langRank(p['language']);
+      final area = '${p['areaDesc'] ?? ''}'.trim();
+      final g = groups[id];
+      if (g == null || rank < g.rank) {
+        groups[id] = _HubGroup(rank, p)
+          ..rings.addAll(rings)
+          ..areas.add(area);
+      } else if (rank == g.rank) {
+        g.rings.addAll(rings);
+        g.areas.add(area);
+      }
+    } catch (_) {
+      continue;
+    }
+  }
+
+  final out = <HazardEvent>[];
+  for (final entry in groups.entries) {
+    final g = entry.value;
+    final p = g.props;
+    final expires = _anyDate(p['expires']);
+    if (expires != null && expires.isBefore(now)) continue;
+    final title = '${p['event'] ?? p['headline'] ?? ''}'.trim();
+    final headline = '${p['headline'] ?? ''}'.trim();
+    final org = '${p['orgName'] ?? p['senderName'] ?? ''}'.trim();
+    final web = '${p['web'] ?? ''}';
+    final hub = '${p['hubLink'] ?? ''}';
+    final areaText = g.areas.where((a) => a.isNotEmpty).join('; ');
+    out.add(HazardEvent(
+      id: 'hub:${entry.key}',
+      type: HazardType.alert,
+      severity: '${p['severity']}' == 'Extreme' ? Severity.extreme : Severity.high,
+      title: title.isEmpty ? 'Alerta oficial' : title,
+      place: areaText.length > 140 ? '${areaText.substring(0, 140)}…' : areaText,
+      detail: [
+        headline,
+        if (org.isNotEmpty) 'Emitido por $org.',
+      ].where((s) => s.isNotEmpty).join('\n'),
+      point: _centroidOf(g.rings),
+      areas: g.rings,
+      time: _anyDate(p['onset']) ??
+          _anyDate(p['effective']) ??
+          _anyDate(p['sent']) ??
+          now,
+      source: org.isEmpty ? 'Alert Hub (OMM)' : org,
+      url: web.startsWith('http')
+          ? web
+          : (hub.startsWith('http') ? hub : null),
+    ));
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Satélite (NASA GIBS, via WMS): só entram as camadas que respondem com imagem.
+// ---------------------------------------------------------------------------
+
+class SatelliteSource {
+  const SatelliteSource(this.layer, this.baseUrl);
+
+  final String layer;
+
+  /// URL base do WMS, terminada em "?".
+  final String baseUrl;
+}
+
+const _satLayers = [
+  'GOES-East_ABI_Band13_Clean_Infrared_v0_NRT_ZENJPEG',
+  'GOES-West_ABI_Band13_Clean_Infrared_v0_NRT_ZENJPEG',
+  'Himawari_AHI_Band13_Clean_Infrared_v0_NRT_ZENJPEG',
+];
+const _satEndpoints = ['nrt', 'best', 'all'];
+
+/// Faz um pedido de teste para cada camada e endereço. Quem não responde com
+/// imagem fica de fora, em vez de deixar o mapa em branco.
+Future<List<SatelliteSource>> probeSatellite() async {
+  final found = <SatelliteSource>[];
+  for (final layer in _satLayers) {
+    for (final ep in _satEndpoints) {
+      final base = 'https://gibs.earthdata.nasa.gov/wms/epsg3857/$ep/wms.cgi?';
+      final url = '${base}SERVICE=WMS&REQUEST=GetMap&VERSION=1.1.1&LAYERS=$layer'
+          '&STYLES=&FORMAT=image/png&TRANSPARENT=TRUE&SRS=EPSG:3857'
+          '&WIDTH=256&HEIGHT=256&BBOX=-10018754,-3503549,-5009377,1689200';
+      try {
+        final res = await http
+            .get(Uri.parse(url), headers: {'User-Agent': _userAgent})
+            .timeout(const Duration(seconds: 20));
+        final type = res.headers['content-type'] ?? '';
+        if (res.statusCode == 200 && type.startsWith('image/')) {
+          found.add(SatelliteSource(layer, base));
+          break;
+        }
+      } catch (_) {
+        // Tenta o próximo endereço.
+      }
+    }
+  }
+  if (found.isEmpty) throw Exception('nenhuma camada respondeu');
+  return found;
 }

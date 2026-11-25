@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'controller.dart';
+import 'filters_sheet.dart';
 import 'format.dart';
 import 'models.dart';
 import 'notifier.dart';
@@ -21,6 +22,23 @@ const _gray = ColorFilter.matrix(<double>[
   0.2126, 0.7152, 0.0722, 0, 0, //
   0.2126, 0.7152, 0.0722, 0, 0, //
   0, 0, 0, 1, 0,
+]);
+
+/// Mapa-base escurecido, para as nuvens do satélite aparecerem.
+const _grayDark = ColorFilter.matrix(<double>[
+  0.1063, 0.3576, 0.0361, 0, 0, //
+  0.1063, 0.3576, 0.0361, 0, 0, //
+  0.1063, 0.3576, 0.0361, 0, 0, //
+  0, 0, 0, 1, 0,
+]);
+
+/// Transforma brilho em transparência: o preto (fora do disco do satélite e
+/// superfície quente) some e só as nuvens frias ficam visíveis.
+const _lumaAlpha = ColorFilter.matrix(<double>[
+  1, 0, 0, 0, 0, //
+  0, 1, 0, 0, 0, //
+  0, 0, 1, 0, 0, //
+  0.4677, 1.5734, 0.1588, 0, -20,
 ]);
 
 const _muted = TextStyle(fontSize: 13.5, color: Palette.muted);
@@ -101,6 +119,29 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
+  void _showFilters() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      backgroundColor: Palette.paper,
+      builder: (_) => FiltersSheet(
+        data: _data,
+        onSetHomeHere: () => _setHome(_map.camera.center),
+      ),
+    );
+  }
+
+  /// Marca "meu local" (toque e segure no mapa).
+  void _setHome(LatLng p) {
+    _data.setHome(p);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Meu local definido. Use os filtros e os avisos para limitar por distância.'),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -119,12 +160,14 @@ class _MapScreenState extends State<MapScreen> {
                   data: _data,
                   onAbout: _showAbout,
                   onSettings: _showSettings,
+                  onFilters: _showFilters,
                 ),
               ),
               _EventsSheet(
                 controller: _sheet,
                 events: events,
                 loading: _data.loading,
+                home: _data.prefs.home,
                 onSelect: (e) => _showEvent(e, fly: true),
               ),
             ],
@@ -137,6 +180,10 @@ class _MapScreenState extends State<MapScreen> {
   Widget _buildMap(BuildContext context, List<HazardEvent> events) {
     final radar = _data.radar;
     final radarOn = _data.enabled.contains(MapLayer.radar);
+    final satOn = _data.enabled.contains(MapLayer.satellite) &&
+        _data.satellite.isNotEmpty;
+    final home = _data.prefs.home;
+    final radiusKm = _data.filters.radiusKm;
     final bottomPad = MediaQuery.sizeOf(context).height * 0.17;
     return FlutterMap(
       mapController: _map,
@@ -149,15 +196,32 @@ class _MapScreenState extends State<MapScreen> {
           flags: InteractiveFlag.all & ~InteractiveFlag.rotate,
         ),
         onTap: (_, point) => _showConditions(point),
+        onLongPress: (_, point) => _setHome(point),
       ),
       children: [
         ColorFiltered(
-          colorFilter: _gray,
+          colorFilter: satOn ? _grayDark : _gray,
           child: TileLayer(
             urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
             userAgentPackageName: _appId,
           ),
         ),
+        if (satOn)
+          for (final sat in _data.satellite)
+            Opacity(
+              opacity: 0.9,
+              child: ColorFiltered(
+                colorFilter: _lumaAlpha,
+                child: TileLayer(
+                  wmsOptions: WMSTileLayerOptions(
+                    baseUrl: sat.baseUrl,
+                    layers: [sat.layer],
+                  ),
+                  userAgentPackageName: _appId,
+                  maxNativeZoom: 7,
+                ),
+              ),
+            ),
         if (radarOn && radar != null)
           Opacity(
             opacity: 0.75,
@@ -170,15 +234,28 @@ class _MapScreenState extends State<MapScreen> {
         PolygonLayer(
           polygons: [
             for (final e in events)
-              if (e.area.isNotEmpty)
+              for (final ring in e.areas)
                 Polygon(
-                  points: e.area,
+                  points: ring,
                   color: e.type.color.withAlpha(46),
                   borderColor: e.type.color,
                   borderStrokeWidth: 2,
                 ),
           ],
         ),
+        if (home != null && radiusKm > 0)
+          CircleLayer(
+            circles: [
+              CircleMarker(
+                point: home,
+                radius: radiusKm * 1000.0,
+                useRadiusInMeter: true,
+                color: const Color(0x1A1C7ED6),
+                borderColor: const Color(0xFF1C7ED6),
+                borderStrokeWidth: 2,
+              ),
+            ],
+          ),
         MarkerLayer(
           markers: [
             // Os mais graves por último, para ficarem por cima.
@@ -191,6 +268,13 @@ class _MapScreenState extends State<MapScreen> {
                   onTap: () => _showEvent(e),
                   child: _HazardDot(event: e),
                 ),
+              ),
+            if (home != null)
+              Marker(
+                point: home,
+                width: 26,
+                height: 26,
+                child: const _HomeDot(),
               ),
           ],
         ),
@@ -242,6 +326,24 @@ class _HazardDot extends StatelessWidget {
   }
 }
 
+class _HomeDot extends StatelessWidget {
+  const _HomeDot();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF1C7ED6),
+        shape: BoxShape.circle,
+        border: Border.all(color: Colors.white, width: 3),
+        boxShadow: const [
+          BoxShadow(color: Color(0x551C7ED6), spreadRadius: 4),
+        ],
+      ),
+    );
+  }
+}
+
 class _TypeBadge extends StatelessWidget {
   const _TypeBadge({required this.type, this.size = 38});
 
@@ -268,11 +370,13 @@ class _TopPanel extends StatelessWidget {
     required this.data,
     required this.onAbout,
     required this.onSettings,
+    required this.onFilters,
   });
 
   final EventsController data;
   final VoidCallback onAbout;
   final VoidCallback onSettings;
+  final VoidCallback onFilters;
 
   @override
   Widget build(BuildContext context) {
@@ -329,11 +433,15 @@ class _TopPanel extends StatelessWidget {
                                 ),
                                 const SizedBox(width: 8),
                               ],
-                              Text(
-                                status,
-                                style: const TextStyle(
-                                  fontSize: 12.5,
-                                  color: Palette.muted,
+                              Flexible(
+                                child: Text(
+                                  status,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 12.5,
+                                    color: Palette.muted,
+                                  ),
                                 ),
                               ),
                             ],
@@ -343,16 +451,29 @@ class _TopPanel extends StatelessWidget {
                     ),
                     IconButton(
                       tooltip: 'Atualizar',
+                      visualDensity: VisualDensity.compact,
                       onPressed: data.loading ? null : data.refresh,
                       icon: const Icon(Icons.refresh),
                     ),
                     IconButton(
+                      tooltip: 'Filtros',
+                      visualDensity: VisualDensity.compact,
+                      onPressed: onFilters,
+                      icon: Badge(
+                        isLabelVisible: !data.filters.isDefault,
+                        smallSize: 8,
+                        child: const Icon(Icons.tune),
+                      ),
+                    ),
+                    IconButton(
                       tooltip: 'Avisos',
+                      visualDensity: VisualDensity.compact,
                       onPressed: onSettings,
                       icon: const Icon(Icons.notifications_none),
                     ),
                     IconButton(
                       tooltip: 'Fontes e aviso',
+                      visualDensity: VisualDensity.compact,
                       onPressed: onAbout,
                       icon: const Icon(Icons.info_outline),
                     ),
@@ -382,6 +503,15 @@ class _TopPanel extends StatelessWidget {
                           color: Palette.muted,
                         ),
                       ),
+                    ),
+                  ),
+                if (data.enabled.contains(MapLayer.satellite) &&
+                    data.satellite.isNotEmpty)
+                  const Padding(
+                    padding: EdgeInsets.only(top: 6),
+                    child: Text(
+                      'Satélite: infravermelho, NASA GIBS',
+                      style: TextStyle(fontSize: 12.5, color: Palette.muted),
                     ),
                   ),
                 if (failed.isNotEmpty)
@@ -442,12 +572,14 @@ class _EventsSheet extends StatelessWidget {
     required this.controller,
     required this.events,
     required this.loading,
+    required this.home,
     required this.onSelect,
   });
 
   final DraggableScrollableController controller;
   final List<HazardEvent> events;
   final bool loading;
+  final LatLng? home;
   final ValueChanged<HazardEvent> onSelect;
 
   @override
@@ -486,6 +618,7 @@ class _EventsSheet extends StatelessWidget {
                   delegate: SliverChildBuilderDelegate(
                     (context, i) => _EventRow(
                       event: events[i],
+                      home: home,
                       onTap: () => onSelect(events[i]),
                     ),
                     childCount: events.length,
@@ -544,14 +677,22 @@ class _SheetHeader extends StatelessWidget {
 }
 
 class _EventRow extends StatelessWidget {
-  const _EventRow({required this.event, required this.onTap});
+  const _EventRow({required this.event, required this.onTap, this.home});
 
   final HazardEvent event;
   final VoidCallback onTap;
+  final LatLng? home;
 
   @override
   Widget build(BuildContext context) {
     final place = event.place;
+    final h = home;
+    final distance = h == null ? null : distanceToEvent(event, h);
+    final distanceText = distance == null
+        ? null
+        : (distance == 0
+            ? 'Na área do aviso'
+            : 'A ${int0(distance)} km de você');
     return InkWell(
       onTap: onTap,
       child: Container(
@@ -584,6 +725,15 @@ class _EventRow extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: _muted,
+                    ),
+                  if (distanceText != null)
+                    Text(
+                      distanceText,
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF1C7ED6),
+                      ),
                     ),
                 ],
               ),
@@ -861,6 +1011,8 @@ class _AboutDialog extends StatelessWidget {
           'Avisos de tornado, tempestade severa e enchente repentina: National Weather Service (EUA).\n'
           'Vento e instabilidade: Open-Meteo.\n'
           'Radar: RainViewer.\n'
+          'Satélite: NASA GIBS.\n'
+          'Alertas oficiais fora dos EUA: Alert Hub da OMM e as autoridades de cada país.\n'
           'Mapa: © OpenStreetMap contributors.\n\n'
           'O Monitor Global é informativo e não substitui os avisos oficiais. '
           'Em caso de emergência, siga as orientações da Defesa Civil e do '
@@ -969,10 +1121,32 @@ class _AlertSettingsSheetState extends State<AlertSettingsSheet> {
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Avisos extremos dos EUA'),
-              subtitle: const Text('Tornado e vento extremo (NWS)'),
+              title: const Text('Alertas oficiais'),
+              subtitle: const Text('Extremos (tornado, vento) e graves perto de você'),
               value: _p.alerts,
               onChanged: (v) => _set(_p.copyWith(alerts: v)),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              _p.home == null
+                  ? 'Avisar só perto de mim: defina seu local (toque e segure no mapa, ou use os filtros).'
+                  : 'Avisar só perto de mim (${coords(_p.home!)}):',
+              style: _muted,
+            ),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                for (final km in const [0, 100, 250, 500, 1000, 2500])
+                  ChoiceChip(
+                    label: Text(km == 0 ? 'Mundo todo' : '${int0(km)} km'),
+                    selected: _p.radiusKm == km,
+                    onSelected: _p.home == null
+                        ? null
+                        : (_) => _set(_p.copyWith(radiusKm: km)),
+                  ),
+              ],
             ),
             const SizedBox(height: 8),
             Wrap(
